@@ -383,20 +383,72 @@ function setupEventListeners() {
 /**
  * Load files and folders for the current path
  */
-async function loadFiles() {
+async function loadFiles(options = {}) {
     try {
-        let url = '/api/folders';
-        if (app.currentPath) {
-            // Use the correct endpoint for folder contents
-            url = `/api/folders/${app.currentPath}/contents`;
+        console.log("Iniciando loadFiles() - cargando archivos...", options);
+        
+        // Flag para forzar el refresco completo ignorando caché
+        const forceRefresh = options.forceRefresh || false;
+        
+        // Prevenir múltiples solicitudes de carga simultáneas
+        if (window.isLoadingFiles) {
+            console.log("Ya hay una carga de archivos en progreso, ignorando solicitud");
+            return;
+        }
+        
+        window.isLoadingFiles = true;
+        
+        // Always ensure a userHomeFolderId is set
+        if (!app.userHomeFolderId) {
+            // If we don't have a home folder ID yet, try to get the user's username
+            const USER_DATA_KEY = 'oxicloud_user';
+            const userData = JSON.parse(localStorage.getItem(USER_DATA_KEY) || '{}');
+            if (userData.username) {
+                // Find user's home folder
+                console.log("Buscando carpeta de usuario para", userData.username);
+                await findUserHomeFolder(userData.username);
+            }
+        }
+        
+        // Agregar timestamp para evitar caché
+        const timestamp = new Date().getTime();
+        let url;
+        
+        // ALWAYS use the userHomeFolderId (current folder or home folder) to avoid showing root
+        if (!app.currentPath || app.currentPath === '') {
+            // If at root, force user to their home folder
+            if (app.userHomeFolderId) {
+                url = `/api/folders/${app.userHomeFolderId}/contents?t=${timestamp}`;
+                app.currentPath = app.userHomeFolderId;
+                ui.updateBreadcrumb(app.userHomeFolderName || 'Home');
+                console.log(`Cargando carpeta del usuario: ${app.userHomeFolderName} (${app.userHomeFolderId})`);
+            } else {
+                // Emergency fallback - this should rarely happen but prevents errors
+                url = `/api/folders?t=${timestamp}`;
+                console.warn("Emergency fallback to root folder - this should not normally happen");
+            }
+        } else {
+            // Normal case - viewing subfolder contents
+            url = `/api/folders/${app.currentPath}/contents?t=${timestamp}`;
+            console.log(`Cargando contenido de subcarpeta: ${app.currentPath}`);
         }
         
         const token = localStorage.getItem('oxicloud_token');
         const requestOptions = {
             headers: {
-                'Authorization': `Bearer ${token}`
-            }
+                'Authorization': `Bearer ${token}`,
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache'
+            },
+            cache: 'no-store'  // Instruir al navegador a no usar caché
         };
+        
+        // Si se especifica forceRefresh, agregar un parámetro adicional para evitar caché
+        if (forceRefresh) {
+            url += `&force_refresh=true`;
+            requestOptions.headers['X-Force-Refresh'] = 'true';
+            console.log('Forzando refresco completo ignorando caché');
+        }
         
         console.log(`Loading files from ${url}`);
         const response = await fetch(url, requestOptions);
@@ -440,15 +492,39 @@ async function loadFiles() {
         
         // Add folders (check if it's an array)
         const folderList = Array.isArray(folders) ? folders : [];
-        folderList.forEach(folder => {
+        
+        // Get user info for filtering
+        const USER_DATA_KEY = 'oxicloud_user';
+        const userData = JSON.parse(localStorage.getItem(USER_DATA_KEY) || '{}');
+        const username = userData.username || '';
+        
+        // Filter folders before adding them to the view
+        const visibleFolders = folderList.filter(folder => {
+            // Skip system folders (starting with dot) when at root
+            if (!app.currentPath && folder.name.startsWith('.')) {
+                return false;
+            }
+            
+            // Skip other users' folders when at root
+            if (!app.currentPath && folder.name.startsWith('Mi Carpeta - ') && !folder.name.includes(username)) {
+                return false;
+            }
+            
+            return true;
+        });
+        
+        // Add filtered folders to the view
+        visibleFolders.forEach(folder => {
             ui.addFolderToView(folder);
         });
         
         // Also load files in this folder
-        let filesUrl = '/api/files';
+        const cacheTimestamp = new Date().getTime();
+        let filesUrl = `/api/files?t=${cacheTimestamp}`; // Agregar timestamp para evitar problemas de caché
         if (app.currentPath) {
-            filesUrl += `?folder_id=${app.currentPath}`;
+            filesUrl += `&folder_id=${app.currentPath}`;
         }
+        console.log(`Cargando archivos desde: ${filesUrl}`);
         
         try {
             console.log(`Fetching files from: ${filesUrl}`);
@@ -487,6 +563,9 @@ async function loadFiles() {
     } catch (error) {
         console.error('Error loading folders:', error);
         ui.showNotification('Error', 'Could not load files and folders');
+    } finally {
+        // Marcar que ya no estamos cargando archivos para permitir solicitudes futuras
+        window.isLoadingFiles = false;
     }
 }
 
@@ -852,9 +931,14 @@ function switchToFilesView() {
         filesListView.style.display = app.currentView === 'list' ? 'block' : 'none';
     }
     
-    // Reset path and load files
-    app.currentPath = '';
-    ui.updateBreadcrumb('');
+    // Use user's home folder instead of root path
+    if (app.userHomeFolderId) {
+        app.currentPath = app.userHomeFolderId;
+        ui.updateBreadcrumb(app.userHomeFolderName || 'Home');
+    } else {
+        // If no home folder is set, this will trigger finding it in loadFiles()
+        app.currentPath = '';
+    }
     loadFiles();
 }
 
@@ -1087,7 +1171,9 @@ function checkAuthentication() {
             const defaultUserData = {
                 id: 'default-user-id',
                 username: 'usuario',
-                email: 'usuario@example.com'
+                email: 'usuario@example.com',
+                storage_quota_bytes: 10737418240, // 10GB default
+                storage_used_bytes: 0
             };
             localStorage.setItem(USER_DATA_KEY, JSON.stringify(defaultUserData));
             
@@ -1096,6 +1182,9 @@ function checkAuthentication() {
             if (userAvatar) {
                 userAvatar.textContent = 'US';
             }
+            
+            // Update storage display with default values
+            updateStorageUsageDisplay(defaultUserData);
         } else {
             // Update avatar with user initials
             const userInitials = userData.username.substring(0, 2).toUpperCase();
@@ -1149,6 +1238,9 @@ function checkAuthentication() {
                 userAvatar.textContent = userInitials;
             }
             
+            // Update storage usage information
+            updateStorageUsageDisplay(userData);
+            
             // Find and load the user's home folder
             findUserHomeFolder(userData.username);
         } else {
@@ -1157,7 +1249,9 @@ function checkAuthentication() {
             const defaultUserData = {
                 id: 'default-user-id',
                 username: 'usuario',
-                email: 'usuario@example.com'
+                email: 'usuario@example.com',
+                storage_quota_bytes: 10737418240, // 10GB default
+                storage_used_bytes: 0
             };
             localStorage.setItem(USER_DATA_KEY, JSON.stringify(defaultUserData));
             
@@ -1166,6 +1260,9 @@ function checkAuthentication() {
             if (userAvatar) {
                 userAvatar.textContent = 'US';
             }
+            
+            // Update storage display with default values
+            updateStorageUsageDisplay(defaultUserData);
             
             // Find and load default folder
             app.currentPath = '';
@@ -1184,7 +1281,9 @@ function checkAuthentication() {
         const defaultUserData = {
             id: 'emergency-user-id',
             username: 'usuario',
-            email: 'usuario@example.com'
+            email: 'usuario@example.com',
+            storage_quota_bytes: 10737418240, // 10GB default
+            storage_used_bytes: 0
         };
         localStorage.setItem('oxicloud_user', JSON.stringify(defaultUserData));
         
@@ -1193,6 +1292,9 @@ function checkAuthentication() {
         if (userAvatar) {
             userAvatar.textContent = 'US';
         }
+        
+        // Update storage display with default values
+        updateStorageUsageDisplay(defaultUserData);
         
         // Load root files
         app.currentPath = '';
@@ -1262,17 +1364,26 @@ async function findUserHomeFolder(username) {
                 console.log(`Found ${folderList.length} folders at root`);
                 
                 // Look for a folder with a name pattern that matches the user's home folder
-                // Typically named "Mi Carpeta - username"
+                // Only exact match "Mi Carpeta - username"
                 const homeFolderPattern = `Mi Carpeta - ${username}`;
-                let homeFolder = folderList.find(folder => folder.name === homeFolderPattern);
                 
-                // If exact match not found, try a more flexible match
-                if (!homeFolder) {
-                    homeFolder = folderList.find(folder => 
-                        folder.name.toLowerCase().includes(username.toLowerCase()) || 
-                        folder.name.startsWith('Mi Carpeta -')
-                    );
-                }
+                // Filter first to remove system folders like .trash that shouldn't be visible
+                const visibleFolders = folderList.filter(folder => {
+                    // Skip system folders (starting with dot)
+                    if (folder.name.startsWith('.')) {
+                        return false;
+                    }
+                    
+                    // Skip other users' folders
+                    if (folder.name.startsWith('Mi Carpeta - ') && !folder.name.includes(username)) {
+                        return false;
+                    }
+                    
+                    return true;
+                });
+                
+                // Find the user's home folder from filtered list
+                let homeFolder = visibleFolders.find(folder => folder.name === homeFolderPattern);
                 
                 if (homeFolder) {
                     console.log(`Found user's home folder: ${homeFolder.name} (${homeFolder.id})`);
@@ -1359,6 +1470,46 @@ function logout() {
     
     // Redirect to login page with correct path
     window.location.href = '/login.html';
+}
+
+/**
+ * Update the storage usage display with the user's actual storage usage
+ * @param {Object} userData - The user data object
+ */
+function updateStorageUsageDisplay(userData) {
+    // Default values
+    let usedBytes = 0;
+    let quotaBytes = 10737418240; // Default 10GB
+    let usagePercentage = 0;
+
+    // Get values from user data if available
+    if (userData) {
+        usedBytes = userData.storage_used_bytes || 0;
+        quotaBytes = userData.storage_quota_bytes || 10737418240;
+        
+        // Calculate percentage (avoid division by zero)
+        if (quotaBytes > 0) {
+            usagePercentage = Math.min(Math.round((usedBytes / quotaBytes) * 100), 100);
+        }
+    }
+
+    // Format the numbers for display
+    const usedFormatted = formatFileSize(usedBytes);
+    const quotaFormatted = formatFileSize(quotaBytes);
+
+    // Update the storage display elements
+    const storageFill = document.querySelector('.storage-fill');
+    const storageInfo = document.querySelector('.storage-info');
+    
+    if (storageFill) {
+        storageFill.style.width = `${usagePercentage}%`;
+    }
+    
+    if (storageInfo) {
+        storageInfo.textContent = `${usagePercentage}% usado (${usedFormatted} / ${quotaFormatted})`;
+    }
+    
+    console.log(`Updated storage display: ${usagePercentage}% (${usedFormatted} / ${quotaFormatted})`);
 }
 
 // Initialize app when DOM is ready

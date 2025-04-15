@@ -12,12 +12,14 @@ use bytes::Bytes;
 use uuid::Uuid;
 use tokio::task;
 
+use crate::infrastructure::services::file_system_utils::FileSystemUtils;
+
 use crate::domain::entities::file::File;
 use crate::domain::repositories::file_repository::{
     FileRepository, FileRepositoryError, FileRepositoryResult
 };
 use crate::application::services::storage_mediator::StorageMediator;
-use crate::application::ports::outbound::IdMappingPort;
+// use crate::application::ports::outbound::IdMappingPort;
 use crate::infrastructure::services::id_mapping_service::IdMappingError;
 use crate::infrastructure::services::file_metadata_cache::{FileMetadataCache, CacheEntryType};
 use crate::domain::services::path_service::{StoragePath, PathService};
@@ -312,12 +314,12 @@ impl FileFsRepository {
         Ok((size, created_at, modified_at))
     }
     
-    /// Creates parent directories if needed with timeout
+    /// Creates parent directories if needed with timeout and fsync
     async fn ensure_parent_directory(&self, abs_path: &PathBuf) -> FileRepositoryResult<()> {
         if let Some(parent) = abs_path.parent() {
             time::timeout(
                 self.config.timeouts.dir_timeout(),
-                fs::create_dir_all(parent)
+                FileSystemUtils::create_dir_with_sync(parent)
             ).await
             .map_err(|_| FileRepositoryError::Timeout(
                 format!("Timeout creating parent directory: {}", parent.display())
@@ -470,6 +472,90 @@ impl FileStoragePort for FileFsRepository {
             .await
             .map_err(|e| DomainError::internal_error("FileStorage", format!("Failed to get path for file with ID: {}: {}", id, e)))
     }
+    
+    async fn get_parent_folder_id(&self, path: &str) -> Result<String, DomainError> {
+        // Convert path string to StoragePath
+        let storage_path = StoragePath::from_string(path);
+        
+        // Get parent path
+        let parent_path = match storage_path.parent() {
+            Some(parent) => parent,
+            None => return Ok("root".to_string()), // Root folder
+        };
+        
+        // If it's an empty path (root), return root ID
+        if parent_path.is_empty() {
+            return Ok("root".to_string());
+        }
+        
+        // Try to get the ID for the parent path from the ID mapping service
+        let parent_id = self.id_mapping_service.get_or_create_id(&parent_path).await
+            .map_err(|e| DomainError::internal_error("FileStorage", 
+                format!("Failed to get parent folder ID for path: {}: {}", path, e)))?;
+                
+        Ok(parent_id)
+    }
+    
+    async fn update_file_content(&self, file_id: &str, content: Vec<u8>) -> Result<(), DomainError> {
+        // First get the file to make sure it exists and to get its path
+        let file = self.get_file_by_id(file_id).await
+            .map_err(|e| DomainError::internal_error("FileStorage", 
+                format!("Failed to get file for update: {}: {}", file_id, e)))?;
+        
+        // Get the file path for writing
+        let file_path = FileStoragePort::get_file_path(self, file_id).await
+            .map_err(|e| DomainError::internal_error("FileStorage", 
+                format!("Failed to get file path for update: {}: {}", file_id, e)))?;
+        
+        // Resolve to actual filesystem path
+        let physical_path = self.storage_mediator.resolve_storage_path(&file_path);
+        
+        // Write the content to the file with fsync
+        FileSystemUtils::atomic_write(&physical_path, &content)
+            .await
+            .map_err(|e| DomainError::internal_error("FileStorage", 
+                format!("Failed to write updated content to file: {}: {}", file_id, e)))?;
+                
+        // Get the metadata and add it to cache if available
+        if let Some(metadata) = std::fs::metadata(&physical_path).ok() {
+            // Create a FileMetadata instance and update the cache
+            use crate::infrastructure::services::file_metadata_cache::FileMetadata;
+            use crate::infrastructure::services::file_metadata_cache::CacheEntryType;
+            use std::time::UNIX_EPOCH;
+            use std::time::Duration;
+            
+            // Get modified and created times
+            let created_at = metadata.created()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+                
+            let modified_at = metadata.modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+                
+            // Default TTL
+            let ttl = Duration::from_secs(60); // 1 minute
+            
+            // Create FileMetadata instance
+            let file_metadata = FileMetadata::new(
+                physical_path.clone(),
+                true,  // exists
+                CacheEntryType::File,
+                Some(metadata.len()),
+                Some(file.mime_type().to_string()),
+                created_at,
+                modified_at,
+                ttl,
+            );
+            
+            // Update the cache
+            self.metadata_cache.update_cache(file_metadata).await;
+        }
+        
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -519,6 +605,64 @@ impl FileRepository for FileFsRepository {
             }
         }
     }
+    
+    #[instrument(skip(self, content))]
+    async fn update_file_content(&self, file_id: &str, content: Vec<u8>) -> FileRepositoryResult<()> {
+        tracing::info!("FileRepository::update_file_content called for file ID: {}", file_id);
+        
+        // Get the file info to verify it exists and get its path
+        let file = self.get_file_by_id(file_id).await?;
+        
+        // Get the file path
+        let storage_path = FileRepository::get_file_path(self, file_id).await?;
+        let physical_path = self.path_service.resolve_path(&storage_path);
+        
+        // Write the content to the file with fsync
+        FileSystemUtils::atomic_write(&physical_path, &content)
+            .await
+            .map_err(|e| FileRepositoryError::IoError(e))?;
+            
+        // Get the metadata and add it to cache if available
+        if let Some(metadata) = std::fs::metadata(&physical_path).ok() {
+            // Create a FileMetadata instance and update the cache
+            use crate::infrastructure::services::file_metadata_cache::FileMetadata;
+            use crate::infrastructure::services::file_metadata_cache::CacheEntryType;
+            use std::time::UNIX_EPOCH;
+            use std::time::Duration;
+            
+            // Get modified and created times
+            let created_at = metadata.created()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+                
+            let modified_at = metadata.modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+                
+            // Default TTL
+            let ttl = Duration::from_secs(60); // 1 minute
+            
+            // Create FileMetadata instance
+            let file_metadata = FileMetadata::new(
+                physical_path.clone(),
+                true,  // exists
+                CacheEntryType::File,
+                Some(metadata.len()),
+                Some(file.mime_type().to_string()),
+                created_at,
+                modified_at,
+                ttl,
+            );
+            
+            // Update the cache
+            self.metadata_cache.update_cache(file_metadata).await;
+        }
+        
+        tracing::info!("File content updated successfully: {}", file_id);
+        Ok(())
+    }
     async fn save_file_from_bytes(
         &self,
         name: String,
@@ -533,9 +677,14 @@ impl FileRepository for FileFsRepository {
                 match self.storage_mediator.get_folder_path(id).await {
                     Ok(path) => {
                         tracing::info!("Using folder path: {:?} for folder_id: {:?}", path, id);
-                        // Convert to StoragePath
-                        let path_str = path.to_string_lossy().to_string();
-                        StoragePath::from_string(&path_str)
+                        // Convert to StoragePath - use just the folder name to avoid path duplication
+                        // Get just the folder name to avoid path duplication
+                        let lossy = path.to_string_lossy().to_string();
+                        let folder_name = path.file_name()
+                            .and_then(|f| f.to_str())
+                            .unwrap_or_else(|| &lossy);
+                        tracing::info!("Using folder name: {} for StoragePath", folder_name);
+                        StoragePath::from_string(folder_name)
                     },
                     Err(e) => {
                         tracing::error!("Error getting folder: {}", e);
@@ -719,13 +868,56 @@ impl FileRepository for FileFsRepository {
         ).await?;
         
         // Ensure ID mapping is persisted - this is critical for later retrieval
-        let save_result = self.id_mapping_service.save_changes().await;
-        if let Err(e) = &save_result {
-            tracing::error!("Failed to save ID mapping for file {}: {}", id, e);
-        } else {
-            tracing::info!("Successfully saved ID mapping for file ID: {} -> path: {}", id, path_string);
+        // Ejecutar múltiples intentos de guardado con verificación para garantizar persistencia
+        for attempt in 1..=3 {
+            match self.id_mapping_service.save_changes().await {
+                Ok(_) => {
+                    tracing::info!("Successfully saved ID mapping for file ID: {} -> path: {} (attempt {})", id, path_string, attempt);
+                    
+                    // Verificar que el mapeo se puede recuperar después de guardado
+                    if let Ok(verified_path) = self.id_mapping_service.get_path_by_id(&id).await {
+                        if verified_path.to_string() == path_string {
+                            tracing::info!("Verified ID mapping is retrievable after save: {} -> {}", id, path_string);
+                            break; // Guaradado correcto y verificado, salir del bucle
+                        } else {
+                            tracing::error!("Mapping verification failed: expected {} but got {}", path_string, verified_path.to_string());
+                            if attempt < 3 {
+                                tracing::info!("Will retry saving ID mapping (attempt {}/3)", attempt + 1);
+                                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                                continue;
+                            } else {
+                                return Err(FileRepositoryError::Other(
+                                    format!("Failed to verify ID mapping for file: {} after 3 attempts", id)
+                                ));
+                            }
+                        }
+                    } else {
+                        tracing::error!("Cannot verify mapping, ID {} not found after save", id);
+                        if attempt < 3 {
+                            tracing::info!("Will retry saving ID mapping (attempt {}/3)", attempt + 1);
+                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                            continue;
+                        } else {
+                            return Err(FileRepositoryError::Other(
+                                format!("Failed to verify ID mapping for file: {} after 3 attempts", id)
+                            ));
+                        }
+                    }
+                },
+                Err(e) => {
+                    tracing::error!("Failed to save ID mapping for file {}: {} (attempt {})", id, e, attempt);
+                    if attempt < 3 {
+                        tracing::info!("Will retry saving ID mapping (attempt {}/3)", attempt + 1);
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        continue;
+                    } else {
+                        return Err(FileRepositoryError::Other(
+                            format!("Failed to save ID mapping for file: {} after 3 attempts - {}", id, e)
+                        ));
+                    }
+                }
+            }
         }
-        save_result?;
         
         // Invalidate any directory cache entries for the parent folders
         // to ensure directory listings show the new file
@@ -752,9 +944,14 @@ impl FileRepository for FileFsRepository {
                 match self.storage_mediator.get_folder_path(fid).await {
                     Ok(path) => {
                         tracing::info!("Using folder path: {:?} for folder_id: {:?}", path, fid);
-                        // Convert to StoragePath
-                        let path_str = path.to_string_lossy().to_string();
-                        StoragePath::from_string(&path_str)
+                        // Convert to StoragePath - use just the folder name to avoid path duplication
+                        // Get just the folder name to avoid path duplication
+                        let lossy = path.to_string_lossy().to_string();
+                        let folder_name = path.file_name()
+                            .and_then(|f| f.to_str())
+                            .unwrap_or_else(|| &lossy);
+                        tracing::info!("Using folder name: {} for StoragePath", folder_name);
+                        StoragePath::from_string(folder_name)
                     },
                     Err(e) => {
                         tracing::error!("Error getting folder: {}", e);
@@ -999,8 +1196,14 @@ impl FileRepository for FileFsRepository {
                 match self.storage_mediator.get_folder_path(id).await {
                     Ok(path) => {
                         tracing::info!("Found folder with path: {:?}", path);
-                        let path_str = path.to_string_lossy().to_string();
-                        StoragePath::from_string(&path_str)
+                        // Convert to StoragePath - use just the folder name to avoid path duplication
+                        // Get just the folder name to avoid path duplication
+                        let lossy = path.to_string_lossy().to_string();
+                        let folder_name = path.file_name()
+                            .and_then(|f| f.to_str())
+                            .unwrap_or_else(|| &lossy);
+                        tracing::info!("Using folder name: {} for StoragePath", folder_name);
+                        StoragePath::from_string(folder_name)
                     },
                     Err(e) => {
                         tracing::error!("Error getting folder by ID: {}: {}", id, e);
@@ -1011,8 +1214,8 @@ impl FileRepository for FileFsRepository {
             None => StoragePath::root(),
         };
         
-        // Get the absolute folder path
-        let abs_folder_path = self.resolve_storage_path(&folder_storage_path);
+        // Get the absolute folder path without duplicate ./storage prefix
+        let abs_folder_path = self.path_service.resolve_path(&folder_storage_path);
         tracing::info!("Absolute folder path: {:?}", abs_folder_path);
         
         // Check if the directory exists
@@ -1331,8 +1534,14 @@ impl FileRepository for FileFsRepository {
             Some(folder_id) => {
                 match self.storage_mediator.get_folder_path(folder_id).await {
                     Ok(path) => {
-                        let path_str = path.to_string_lossy().to_string();
-                        StoragePath::from_string(&path_str)
+                        // Convert to StoragePath - use just the folder name to avoid path duplication
+                        // Get just the folder name to avoid path duplication
+                        let lossy = path.to_string_lossy().to_string();
+                        let folder_name = path.file_name()
+                            .and_then(|f| f.to_str())
+                            .unwrap_or_else(|| &lossy);
+                        tracing::info!("Target folder name: {} for StoragePath", folder_name);
+                        StoragePath::from_string(folder_name)
                     },
                     Err(e) => {
                         return Err(FileRepositoryError::Other(
@@ -1361,10 +1570,10 @@ impl FileRepository for FileFsRepository {
         // Ensure the target directory exists
         self.ensure_parent_directory(&new_abs_path).await?;
         
-        // Move the file physically (efficient rename operation) with timeout
+        // Move the file physically with fsync (efficient rename operation) with timeout
         time::timeout(
             self.config.timeouts.file_timeout(),
-            fs::rename(&old_abs_path, &new_abs_path)
+            FileSystemUtils::rename_with_sync(&old_abs_path, &new_abs_path)
         ).await
         .map_err(|_| FileRepositoryError::Timeout(format!("Timeout moving file from {} to {}", 
                                                         old_abs_path.display(), new_abs_path.display())))?

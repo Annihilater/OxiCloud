@@ -18,8 +18,8 @@ END $BODY$;
 -- Users table
 CREATE TABLE IF NOT EXISTS auth.users (
     id VARCHAR(36) PRIMARY KEY,
-    username VARCHAR(32) UNIQUE NOT NULL,
-    email VARCHAR(255) UNIQUE NOT NULL,
+    username TEXT UNIQUE NOT NULL,
+    email TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
     role auth.userrole NOT NULL,
     storage_quota_bytes BIGINT NOT NULL DEFAULT 10737418240, -- 10GB default
@@ -38,9 +38,9 @@ CREATE INDEX IF NOT EXISTS idx_users_email ON auth.users(email);
 CREATE TABLE IF NOT EXISTS auth.sessions (
     id VARCHAR(36) PRIMARY KEY,
     user_id VARCHAR(36) NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-    refresh_token VARCHAR(255) NOT NULL UNIQUE,
+    refresh_token TEXT NOT NULL UNIQUE,
     expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-    ip_address VARCHAR(45), -- to support IPv6
+    ip_address TEXT, -- to support IPv6
     user_agent TEXT,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     revoked BOOLEAN NOT NULL DEFAULT FALSE
@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS auth.user_files (
     id SERIAL PRIMARY KEY,
     user_id VARCHAR(36) NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     file_path TEXT NOT NULL,
-    file_id VARCHAR(255) NOT NULL,
+    file_id TEXT NOT NULL,
     size_bytes BIGINT NOT NULL DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -83,8 +83,8 @@ CREATE INDEX IF NOT EXISTS idx_user_files_file_id ON auth.user_files(file_id);
 CREATE TABLE IF NOT EXISTS auth.user_favorites (
     id SERIAL PRIMARY KEY,
     user_id VARCHAR(36) NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-    item_id VARCHAR(255) NOT NULL,
-    item_type VARCHAR(10) NOT NULL, -- 'file' or 'folder'
+    item_id TEXT NOT NULL,
+    item_type TEXT NOT NULL, -- 'file' or 'folder'
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(user_id, item_id, item_type)
 );
@@ -102,8 +102,8 @@ CREATE INDEX IF NOT EXISTS idx_user_favorites_user_type ON auth.user_favorites(u
 CREATE TABLE IF NOT EXISTS auth.user_recent_files (
     id SERIAL PRIMARY KEY,
     user_id VARCHAR(36) NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-    item_id VARCHAR(255) NOT NULL,
-    item_type VARCHAR(10) NOT NULL, -- 'file' or 'folder'
+    item_id TEXT NOT NULL,
+    item_type TEXT NOT NULL, -- 'file' or 'folder'
     accessed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(user_id, item_id, item_type)
 );

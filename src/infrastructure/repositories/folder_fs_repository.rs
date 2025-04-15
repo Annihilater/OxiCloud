@@ -11,7 +11,7 @@ use crate::domain::repositories::folder_repository::{
     FolderRepository, FolderRepositoryError, FolderRepositoryResult
 };
 use crate::domain::services::path_service::{StoragePath, PathService};
-use crate::application::ports::outbound::IdMappingPort;
+// use crate::application::ports::outbound::IdMappingPort;
 use crate::infrastructure::services::id_mapping_service::{IdMappingService, IdMappingError};
 use crate::application::services::storage_mediator::StorageMediator;
 use crate::application::ports::outbound::FolderStoragePort;
@@ -238,14 +238,14 @@ impl From<FolderRepositoryError> for DomainError {
                 DomainError::already_exists("Folder", path)
             },
             FolderRepositoryError::InvalidPath(path) => {
-                DomainError::validation_error("Folder", format!("Invalid path: {}", path))
+                DomainError::validation_error(format!("Invalid path: {}", path))
             },
             FolderRepositoryError::IoError(e) => {
                 DomainError::internal_error("Folder", format!("IO error: {}", e))
                     .with_source(e)
             },
             FolderRepositoryError::ValidationError(msg) => {
-                DomainError::validation_error("Folder", msg)
+                DomainError::validation_error(msg)
             },
             FolderRepositoryError::MappingError(msg) => {
                 DomainError::internal_error("Folder", format!("Mapping error: {}", msg))
