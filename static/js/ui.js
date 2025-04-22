@@ -362,12 +362,17 @@ const ui = {
             return window.i18n.t(key);
         };
         
+        // First determine if the current view is the user's home folder 
+        const isUserHomeFolder = username && window.app.userHomeFolderName && 
+            window.app.userHomeFolderName.includes(username) && 
+            folderName === window.app.userHomeFolderName;
+            
         // Set appropriate text for home item
-        if (username && folderName && folderName.includes(username)) {
+        if (isUserHomeFolder) {
             // If the current folder is the user's home folder, label it as "Home"
             homeItem.textContent = getTranslatedText('breadcrumb.home', 'Home');
         } else if (folderName && folderName.startsWith('Mi Carpeta')) {
-            // If the current folder is another user's home folder or a special folder, use its name
+            // If viewing a root folder but not the user's home folder, use its full name
             homeItem.textContent = folderName;
         } else {
             // Default - use "Home" label
@@ -513,6 +518,15 @@ const ui = {
      * @param {Object} folder - Folder object
      */
     addFolderToView(folder) {
+        // Verificar si la carpeta ya existe en la vista para evitar duplicados
+        if (document.querySelector(`.file-card[data-folder-id="${folder.id}"]`) || 
+            document.querySelector(`.file-item[data-folder-id="${folder.id}"]`)) {
+            console.log(`Carpeta ${folder.name} (${folder.id}) ya existe en la vista, no duplicando`);
+            return;
+        }
+        
+        console.log(`Añadiendo carpeta a la vista: ${folder.name} (${folder.id})`);
+        
         // Grid view element
         const folderGridElement = document.createElement('div');
         folderGridElement.className = 'file-card';
@@ -704,6 +718,15 @@ const ui = {
      * @param {Object} file - File object
      */
     addFileToView(file) {
+        // Verificar si el archivo ya existe en la vista para evitar duplicados
+        if (document.querySelector(`.file-card[data-file-id="${file.id}"]`) ||
+            document.querySelector(`.file-item[data-file-id="${file.id}"]`)) {
+            console.log(`Archivo ${file.name} (${file.id}) ya existe en la vista, no duplicando`);
+            return;
+        }
+        
+        console.log(`Añadiendo archivo a la vista: ${file.name} (${file.id})`);
+        
         // Determine icon and type
         let iconClass = 'fas fa-file';
         let iconSpecialClass = '';

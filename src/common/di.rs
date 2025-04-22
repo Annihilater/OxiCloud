@@ -311,6 +311,9 @@ pub struct AppState {
     pub share_service: Option<Arc<dyn crate::application::ports::share_ports::ShareUseCase>>,
     pub favorites_service: Option<Arc<dyn FavoritesUseCase>>,
     pub recent_service: Option<Arc<dyn RecentItemsUseCase>>,
+    pub storage_usage_service: Option<Arc<dyn crate::application::ports::storage_ports::StorageUsagePort>>,
+    pub calendar_service: Option<Arc<dyn crate::application::ports::storage_ports::StorageUseCase>>,
+    pub contact_service: Option<Arc<dyn crate::application::ports::storage_ports::StorageUseCase>>,
 }
 
 impl Default for AppState {
@@ -439,6 +442,14 @@ impl Default for AppState {
             async fn delete_file(&self, _id: &str) -> Result<(), crate::common::errors::DomainError> {
                 Ok(())
             }
+            
+            async fn get_folder_details(&self, _folder_id: &str) -> Result<crate::domain::entities::file::File, crate::common::errors::DomainError> {
+                Ok(crate::domain::entities::file::File::default())
+            }
+            
+            async fn get_folder_path_str(&self, _folder_id: &str) -> Result<String, crate::common::errors::DomainError> {
+                Ok("/Mi Carpeta - dummy".to_string())
+            }
         }
         
         struct DummyFileStoragePort;
@@ -481,6 +492,14 @@ impl Default for AppState {
             
             async fn get_file_path(&self, _id: &str) -> Result<crate::domain::services::path_service::StoragePath, crate::common::errors::DomainError> {
                 Ok(crate::domain::services::path_service::StoragePath::from_string("/"))
+            }
+            
+            async fn get_parent_folder_id(&self, _path: &str) -> Result<String, crate::common::errors::DomainError> {
+                Ok("root".to_string())
+            }
+            
+            async fn update_file_content(&self, _file_id: &str, _content: Vec<u8>) -> Result<(), crate::common::errors::DomainError> {
+                Ok(())
             }
         }
         
@@ -616,6 +635,18 @@ impl Default for AppState {
             
             async fn get_file(&self, _id: &str) -> Result<crate::application::dtos::file_dto::FileDto, crate::common::errors::DomainError> {
                 Ok(crate::application::dtos::file_dto::FileDto::default())
+            }
+            
+            async fn get_file_by_path(&self, _path: &str) -> Result<crate::application::dtos::file_dto::FileDto, crate::common::errors::DomainError> {
+                Ok(crate::application::dtos::file_dto::FileDto::default())
+            }
+            
+            async fn create_file(&self, _parent_path: &str, _filename: &str, _content: &[u8], _content_type: &str) -> Result<crate::application::dtos::file_dto::FileDto, crate::common::errors::DomainError> {
+                Ok(crate::application::dtos::file_dto::FileDto::default())
+            }
+            
+            async fn update_file(&self, _path: &str, _content: &[u8]) -> Result<(), crate::common::errors::DomainError> {
+                Ok(())
             }
             
             async fn list_files(&self, _folder_id: Option<&str>) -> Result<Vec<crate::application::dtos::file_dto::FileDto>, crate::common::errors::DomainError> {
@@ -795,6 +826,9 @@ impl Default for AppState {
             share_service: None,
             favorites_service: None,
             recent_service: None,
+            storage_usage_service: None,
+            calendar_service: None,
+            contact_service: None,
         }
     }
 }
@@ -815,6 +849,9 @@ impl AppState {
             share_service: None,
             favorites_service: None,
             recent_service: None,
+            storage_usage_service: None,
+            calendar_service: None,
+            contact_service: None,
         }
     }
     
@@ -845,6 +882,21 @@ impl AppState {
     
     pub fn with_recent_service(mut self, recent_service: Arc<dyn RecentItemsUseCase>) -> Self {
         self.recent_service = Some(recent_service);
+        self
+    }
+    
+    pub fn with_storage_usage_service(mut self, storage_usage_service: Arc<dyn crate::application::ports::storage_ports::StorageUsagePort>) -> Self {
+        self.storage_usage_service = Some(storage_usage_service);
+        self
+    }
+    
+    pub fn with_calendar_service(mut self, calendar_service: Arc<dyn crate::application::ports::storage_ports::StorageUseCase>) -> Self {
+        self.calendar_service = Some(calendar_service);
+        self
+    }
+    
+    pub fn with_contact_service(mut self, contact_service: Arc<dyn crate::application::ports::storage_ports::StorageUseCase>) -> Self {
+        self.contact_service = Some(contact_service);
         self
     }
 }
